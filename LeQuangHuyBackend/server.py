@@ -223,6 +223,12 @@ class Handler(BaseHTTPRequestHandler):
         now = int(time.time())
         if method == 'GET' and path == '/health':
             return 200, {'status': 'ok'}
+        if method == 'GET' and path == '/health/face':
+            try:
+                face_auth.check_ready()
+            except face_auth.FaceError as exc:
+                return 503, {'status': 'error', 'message': str(exc)}
+            return 200, {'status': 'ok'}
         if method == 'POST' and path == '/auth/register':
             username = str(body.get('username', '')).strip()
             email = str(body.get('email', '')).strip().lower()

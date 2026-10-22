@@ -30,10 +30,17 @@ def _models():
     return _detector, _recognizer
 
 
+def check_ready():
+    _models()
+
+
 def analyze(image_b64):
     try:
-        import cv2
-        import numpy as np
+        try:
+            import cv2
+            import numpy as np
+        except ImportError as exc:
+            raise FaceError('Backend chưa cài OpenCV hoặc NumPy để nhận diện khuôn mặt') from exc
         raw = base64.b64decode(image_b64, validate=True)
         if not 5000 <= len(raw) <= 350000:
             raise FaceError('Ảnh khuôn mặt không hợp lệ')

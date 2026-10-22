@@ -107,6 +107,15 @@ sudo ufw allow 8080/tcp
 sudo ufw status
 curl -f http://127.0.0.1:8080/health
 curl -f http://103.131.85.188:8080/health
+curl -i http://103.131.85.188:8080/health/face
+```
+
+`/health/face` trả `200` khi OpenCV và hai mô hình khuôn mặt tải được. Nếu trả `503`, cài lại thư viện nhận diện bằng đúng Python mà service đang chạy, rồi khởi động lại:
+
+```bash
+sudo /opt/lequanghuy/.venv/bin/pip install -r /opt/lequanghuy/LeQuangHuyBackend/requirements-face.txt
+sudo systemctl restart LeQuangHuyApi.service
+curl -i http://127.0.0.1:8080/health/face
 ```
 
 Nếu VPS có firewall của nhà cung cấp, mở inbound TCP 8080 tại đó. Từ **máy khác mạng VPS** chạy `curl -f http://103.131.85.188:8080/health`; phải thấy `{"status":"ok"}`. API chính không có Swagger; `/swagger` trả 404. Sau này nên dùng domain và HTTPS, rồi đổi `API_BASE_URL` khi build Flutter.

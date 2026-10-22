@@ -16,6 +16,15 @@ from email_service import EmailConfigurationError, EmailService
 
 
 class ApiTest(unittest.TestCase):
+    def test_face_runtime_health_reports_missing_models(self):
+        with patch.object(server.face_auth, 'check_ready', side_effect=server.face_auth.FaceError('OpenCV missing')):
+            status, body = self.call('GET', '/health/face')
+        self.assertEqual(status, 503)
+        self.assertEqual(body['message'], 'OpenCV missing')
+        with patch.object(server.face_auth, 'check_ready'):
+            status, body = self.call('GET', '/health/face')
+        self.assertEqual((status, body), (200, {'status': 'ok'}))
+
     def test_email_service_configuration_and_smtp(self):
         with patch.dict(os.environ, {'APP_ENV': 'Production', 'SMTP_HOST': '',
                                      'SMTP_USER': '', 'SMTP_PASSWORD': '', 'SMTP_FROM': ''}):

@@ -171,10 +171,21 @@ class FacePreviewActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun capture() {
         if (!scanning || camera == null || isFinishing) return
         try {
-            val bitmap = preview.getBitmap(480, 640) ?: throw IllegalStateException("Chưa có hình ảnh camera")
+            val source = preview.bitmap ?: throw IllegalStateException("Chưa có hình ảnh camera")
+            // Keep the camera image's proportions. Scaling the whole portrait preview
+            // to 480x640 stretches faces on tall phone screens and hurts detection.
+            val cropWidth = minOf(source.width, source.height * 3 / 4)
+            val cropHeight = minOf(source.height, source.width * 4 / 3)
+            val left = (source.width - cropWidth) / 2
+            val centerY = (source.height * 0.43f).toInt()
+            val top = (centerY - cropHeight / 2).coerceIn(0, source.height - cropHeight)
+            val cropped = Bitmap.createBitmap(source, left, top, cropWidth, cropHeight)
+            val bitmap = Bitmap.createScaledBitmap(cropped, 480, 640, true)
             val stream = ByteArrayOutputStream()
             bitmap.compress(Bitmap.CompressFormat.JPEG, 75, stream)
-            bitmap.recycle()
+            if (bitmap !== cropped && bitmap !== source) bitmap.recycle()
+            if (cropped !== source) cropped.recycle()
+            source.recycle()
             images.add(Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP))
             val targetCount = if (mode == "enroll") 3 else 2
             if (images.size < targetCount) {
