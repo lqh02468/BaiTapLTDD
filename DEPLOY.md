@@ -110,10 +110,10 @@ curl -f http://103.131.85.188:8080/health
 curl -i http://103.131.85.188:8080/health/face
 ```
 
-`/health/face` trả `200` khi OpenCV và hai mô hình khuôn mặt tải được. Nếu trả `503`, cài lại thư viện nhận diện bằng đúng Python mà service đang chạy, rồi khởi động lại:
+`/health/face` trả `200` khi OpenCV và hai mô hình khuôn mặt tải được. VPS hiện tại không hỗ trợ tập lệnh CPU `X86_V2` mà NumPy 2.4+ yêu cầu; `requirements-face.txt` đã khóa NumPy 2.3.5. Nếu trả `503`, cài lại thư viện bằng đúng Python mà service đang chạy, rồi khởi động lại:
 
 ```bash
-sudo /opt/lequanghuy/.venv/bin/pip install -r /opt/lequanghuy/LeQuangHuyBackend/requirements-face.txt
+sudo /opt/lequanghuy/.venv/bin/python -m pip install --no-cache-dir -r /opt/lequanghuy/LeQuangHuyBackend/requirements-face.txt
 sudo systemctl restart LeQuangHuyApi.service
 curl -i http://127.0.0.1:8080/health/face
 ```

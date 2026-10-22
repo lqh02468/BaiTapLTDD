@@ -26,6 +26,8 @@ def _models():
                 str(MODEL_DIR / 'sface_int8.onnx'), '')
             _detector, _recognizer = detector, recognizer
         except Exception as exc:
+            if 'X86_V2' in str(exc):
+                raise FaceError('NumPy không tương thích CPU VPS; cài lại requirements-face.txt') from exc
             raise FaceError('Backend chưa cài OpenCV hoặc thiếu mô hình khuôn mặt') from exc
     return _detector, _recognizer
 

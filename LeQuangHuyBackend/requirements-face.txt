@@ -1,2 +1,3 @@
 opencv-python-headless==4.11.0.86
-numpy>=1.26,<3
+# NumPy 2.4+ wheels require X86_V2, which the current VPS CPU does not expose.
+numpy==2.3.5
