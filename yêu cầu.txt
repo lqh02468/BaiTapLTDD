@@ -1,0 +1,20 @@
+Đề kiểm tra môn học
+Xây dựng ứng dụng di động có các chức năng sau:
+1. Đăng ký tài khoản qua email
+	hoặc Đăng ký bằng bên thứ 3: Backend dùng OAuth2.0
+2. Đăng nhập
+	- Tên đăng nhập + mật khẩu + OTP(Email OTP)
+3. Phân quyền người dùng: 
+	- Nếu người dùng là admin: vào trang quản trị
+	- Nếu người dùng là nhân viên: vào Dashboard của nhân viên tương ứng
+	- Nếu người dùng là khách hàng hoặc...: Vào trang tương ứng
+4. Các chức năng CRUD (4.5đ)
+5. làm 3 chức năng (3,5)
+	a. Đăng nhập bằng khuôn mặt
+	b. Chia sẻ vị trí
+	c. Nhận diện vân tay/NFC/QR/Barcode
+6. Tính năng mới mà các app hiện tại tương ứng chưa có (tự đề xuất) (1đ)
+7. Giao diện đẹp, dễ dùng, cả nhóm chạy được (1đ)
+
+Tên đề tài : App điểm danh cho sinh viên
+Đặt tên project; : LeQuangHuy

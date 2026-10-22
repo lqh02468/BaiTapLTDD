@@ -1,0 +1,15 @@
+**/__pycache__/
+*.pyc
+backend/*.db
+backend/*.db-*
+backend/.env
+mobile/.dart_tool/
+mobile/build/
+mobile/.flutter-plugins*
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/key.properties
+mobile/.metadata
+.tool/
+mobile/android/.kotlin/
+mobile/android/build/
