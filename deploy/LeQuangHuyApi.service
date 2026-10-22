@@ -1,0 +1,22 @@
+[Unit]
+Description=LeQuangHuyApi attendance API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lequanghuy
+Group=lequanghuy
+WorkingDirectory=/opt/lequanghuy/LeQuangHuyBackend
+EnvironmentFile=/etc/lequanghuy-api.env
+ExecStart=/opt/lequanghuy/.venv/bin/python /opt/lequanghuy/LeQuangHuyBackend/server.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lequanghuy
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

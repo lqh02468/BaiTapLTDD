@@ -2,7 +2,7 @@
 
 ## Kiến trúc source hiện tại
 
-Flutter trong `mobile/` gọi **API Python** ở `backend/server.py`. API này quản lý tài khoản, OTP, khuôn mặt, lớp, phiên và điểm danh; nó dùng SQLite. `face-api/` là ASP.NET Core **.NET 10** API khuôn mặt phụ, dùng `Microsoft.Data.Sqlite`, không được Flutter gọi và không có Entity Framework migration. Vì vậy chạy `dotnet publish` riêng cho `face-api/` sẽ **không** thay thế API chính. Hướng dẫn dưới đây triển khai API chính để điện thoại dùng đủ chức năng. Không chạy cả hai trên port 8080.
+Flutter trong `LeQuangHuyFrontend/` gọi **API Python** ở `LeQuangHuyBackend/server.py`. API này quản lý tài khoản, OTP, khuôn mặt, lớp, phiên và điểm danh; nó dùng SQLite. `LeQuangHuyApi/` là ASP.NET Core **.NET 10** API khuôn mặt phụ, dùng `Microsoft.Data.Sqlite`, không được Flutter gọi và không có Entity Framework migration. Vì vậy chạy `dotnet publish` riêng cho `LeQuangHuyApi/` sẽ **không** thay thế API chính. Hướng dẫn dưới đây triển khai API chính để điện thoại dùng đủ chức năng. Không chạy cả hai trên port 8080.
 
 ## 1. Chuẩn bị VPS
 
@@ -18,21 +18,21 @@ sudo install -d -o lequanghuy -g lequanghuy -m 750 /var/lib/lequanghuy
 sudo git clone https://github.com/lqh02468/BaiTapLTDD.git /opt/lequanghuy
 cd /opt/lequanghuy
 sudo python3 -m venv .venv
-sudo .venv/bin/pip install -r backend/requirements-face.txt
+sudo .venv/bin/pip install -r LeQuangHuyBackend/requirements-face.txt
 sudo chown -R root:root /opt/lequanghuy
 sudo chmod -R a+rX /opt/lequanghuy
 ```
 
 Nếu user/service đã tồn tại thì bỏ qua lệnh tạo tương ứng. Kiểm tra bản Ubuntu/Python và dung lượng RAM; OpenCV cần thư viện hệ thống và đủ RAM. Nếu `import cv2` lỗi vì thiếu `libGL.so.1`, cài `libgl1`.
 
-`dotnet restore face-api/FaceApi.csproj` và `dotnet publish face-api/FaceApi.csproj -c Release` chỉ build API phụ. Không cần chạy chúng để deploy app chính. Source không dùng SQL Server hoặc PostgreSQL nên không có lệnh EF migration.
+`dotnet restore LeQuangHuyApi/LeQuangHuyApi.csproj` và `dotnet publish LeQuangHuyApi/LeQuangHuyApi.csproj -c Release` chỉ build API phụ. Không cần chạy chúng để deploy app chính. Source không dùng SQL Server hoặc PostgreSQL nên không có lệnh EF migration.
 
 ## 2. Chuyển database lên VPS
 
-API mặc định dùng `backend/attendance.db` trên laptop. Để giữ tài khoản, FaceEmbedding/mẫu khuôn mặt, lớp và điểm danh, tạo **snapshot SQLite** trong lúc backend local đã dừng:
+API mặc định dùng `LeQuangHuyBackend/attendance.db` trên laptop. Để giữ tài khoản, FaceEmbedding/mẫu khuôn mặt, lớp và điểm danh, tạo **snapshot SQLite** trong lúc backend local đã dừng:
 
 ```bash
-python backend/backup_db.py attendance-backup.db
+python LeQuangHuyBackend/backup_db.py attendance-backup.db
 scp attendance-backup.db <ssh-user>@103.131.85.188:/tmp/attendance-backup.db
 ```
 
@@ -47,7 +47,7 @@ Kết quả integrity phải là `ok`. Nếu không cần dữ liệu cũ, bỏ 
 
 ## 3. Cấu hình secrets và SMTP
 
-Tạo `/etc/lequanghuy-api.env` trên VPS theo `backend/.env.example`, thay toàn bộ giá trị rỗng bằng giá trị thật. File này nằm ngoài Git:
+Tạo `/etc/lequanghuy-api.env` trên VPS theo `LeQuangHuyBackend/.env.example`, thay toàn bộ giá trị rỗng bằng giá trị thật. File này nằm ngoài Git:
 
 ```bash
 sudo install -o root -g root -m 600 /dev/null /etc/lequanghuy-api.env
@@ -71,21 +71,34 @@ SMTP_FROM=<gmail-gui>
 CORS_ORIGINS=
 ```
 
-Với Gmail, `SMTP_PASSWORD` là **App Password**, không phải mật khẩu Gmail thường. Nếu provider khác, đổi host/port/tài khoản tương ứng và bảo đảm hỗ trợ STARTTLS. API sẽ từ chối gửi OTP nếu SMTP thiếu trong Production; không in OTP ra log. `BOOTSTRAP_ADMIN_*` chỉ tạo admin khi database chưa có admin. API hiện dùng token ngẫu nhiên lưu dạng hash trong SQLite, **không dùng JWT** nên không có `Jwt__Key`.
+Với Gmail, `SMTP_PASSWORD` là **App Password**, không phải mật khẩu Gmail thường. Nếu provider khác, đổi host/port/tài khoản tương ứng và bảo đảm hỗ trợ STARTTLS. Tài khoản `admin` có role `admin` đăng nhập trực tiếp bằng mật khẩu, không cần OTP; tài khoản giảng viên/sinh viên vẫn cần SMTP để nhận OTP. API sẽ từ chối gửi OTP nếu SMTP thiếu trong Production; không in OTP ra log. `BOOTSTRAP_ADMIN_*` chỉ tạo admin khi database chưa có admin. API hiện dùng token ngẫu nhiên lưu dạng hash trong SQLite, **không dùng JWT** nên không có `Jwt__Key`.
 
 Android native không bị CORS. Nếu sau này có web frontend, đặt `CORS_ORIGINS=https://ten-mien-web` (nhiều origin cách nhau bằng dấu phẩy); không đặt `*`.
 
 ## 4. Cài và chạy lâu dài với systemd
 
 ```bash
-sudo cp /opt/lequanghuy/deploy/lequanghuy-api.service /etc/systemd/system/lequanghuy-api.service
+sudo cp /opt/lequanghuy/deploy/LeQuangHuyApi.service /etc/systemd/system/LeQuangHuyApi.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now lequanghuy-api
-sudo systemctl status lequanghuy-api --no-pager
-sudo journalctl -u lequanghuy-api -n 80 --no-pager
+sudo systemctl enable --now LeQuangHuyApi
+sudo systemctl status LeQuangHuyApi --no-pager
+sudo journalctl -u LeQuangHuyApi -n 80 --no-pager
 ```
 
-Service tự chạy sau reboot, tự khởi động lại khi lỗi, đọc secrets từ `/etc/lequanghuy-api.env` và listen `0.0.0.0:8080`. Cập nhật source bằng `git pull` trong `/opt/lequanghuy`, cài lại dependencies nếu thay requirements, rồi `sudo systemctl restart lequanghuy-api`.
+Service tự chạy sau reboot, tự khởi động lại khi lỗi, đọc secrets từ `/etc/lequanghuy-api.env` và listen `0.0.0.0:8080`. Cập nhật source bằng `git pull` trong `/opt/lequanghuy`, cài lại dependencies nếu thay requirements, rồi `sudo systemctl restart LeQuangHuyApi`.
+
+Nếu VPS đã chạy unit cũ `lequanghuy-api.service`, chuyển sang tên mới sau khi push commit đổi tên thư mục lên GitHub:
+
+```bash
+sudo systemctl disable --now lequanghuy-api.service
+sudo git -C /opt/lequanghuy pull --ff-only origin main
+sudo cp /opt/lequanghuy/deploy/LeQuangHuyApi.service /etc/systemd/system/LeQuangHuyApi.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now LeQuangHuyApi.service
+sudo systemctl status LeQuangHuyApi.service --no-pager
+```
+
+Giữ `/etc/lequanghuy-api.env` hiện có để không phải di chuyển file secret. `ATTENDANCE_DB=/var/lib/lequanghuy/attendance.db` cũng giữ nguyên để dùng database hiện tại.
 
 ## 5. Firewall và kiểm tra Internet
 
@@ -100,12 +113,12 @@ Nếu VPS có firewall của nhà cung cấp, mở inbound TCP 8080 tại đó. 
 
 ## 6. Kiểm tra OTP thật và app
 
-Từ app Android, đăng ký với email thật. `POST /auth/register` gửi OTP đến email đó; nhập mã trong app sẽ gọi `/auth/register/verify`. Đăng nhập bằng username/password sẽ gửi mã vào **email tài khoản trong database**, sau đó `/auth/verify` cấp token. Kiểm tra sai mã, mã quá 5 phút, dùng lại, gửi mã mới và giới hạn 60 giây. Kiểm tra hộp thư Spam nếu email chưa đến; xem log service nhưng không có OTP production. Đừng dùng tài khoản email của người khác để thử.
+Từ app Android, đăng ký với email thật. `POST /auth/register` gửi OTP đến email đó; nhập mã trong app sẽ gọi `/auth/register/verify`. Giảng viên/sinh viên đăng nhập bằng username/password sẽ nhận mã vào **email tài khoản trong database**, sau đó `/auth/verify` cấp token. Tài khoản username `admin` có role `admin` nhận token ngay sau khi nhập đúng mật khẩu. Kiểm tra sai mã, mã quá 5 phút, dùng lại, gửi mã mới và giới hạn 60 giây. Kiểm tra hộp thư Spam nếu email chưa đến; xem log service nhưng không có OTP production. Đừng dùng tài khoản email của người khác để thử.
 
 Chạy trên điện thoại thật (có Internet, không cần cùng Wi-Fi/laptop):
 
 ```bash
-cd mobile
+cd LeQuangHuyFrontend
 flutter pub get
 flutter run --dart-define=API_BASE_URL=http://103.131.85.188:8080
 ```

@@ -2,10 +2,13 @@
 
 $ErrorActionPreference = 'Stop'
 $adbCommand = Get-Command adb -ErrorAction SilentlyContinue
-$adbPath = if ($adbCommand) { $adbCommand.Source } elseif (Test-Path 'D:\Android\platform-tools\adb.exe') {
-    'D:\Android\platform-tools\adb.exe'
-} else {
-    throw 'Không tìm thấy adb. Cài Android platform-tools hoặc thêm adb vào PATH.'
+$sdkRoots = @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT) | Where-Object { $_ }
+$adbPath = if ($adbCommand) { $adbCommand.Source } else {
+    $sdkAdb = $sdkRoots | ForEach-Object { Join-Path $_ 'platform-tools\adb.exe' } |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($sdkAdb) { $sdkAdb } else {
+        throw 'Không tìm thấy adb. Cài Android SDK Platform-Tools, thêm adb vào PATH hoặc đặt ANDROID_HOME.'
+    }
 }
 
 try {
@@ -28,7 +31,7 @@ if ($DeviceId -notin $ready) { throw "Thiết bị $DeviceId không ở trạng 
 if ($LASTEXITCODE -ne 0) { throw 'Không tạo được adb reverse.' }
 Write-Host "ADB reverse đã bật cho $DeviceId. API: http://127.0.0.1:8080"
 
-Push-Location (Join-Path $PSScriptRoot 'mobile')
+Push-Location (Join-Path $PSScriptRoot 'LeQuangHuyFrontend')
 try {
     flutter pub get
     if ($LASTEXITCODE -ne 0) { throw 'flutter pub get thất bại.' }
