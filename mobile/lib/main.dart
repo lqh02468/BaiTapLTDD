@@ -45,6 +45,7 @@ class _AuthPageState extends State<AuthPage> {
   bool register = false;
   bool busy = false;
   int? challengeId;
+  bool verifyingRegistration = false;
 
   Future<void> testConnection() async {
     setState(() => busy = true);
@@ -65,10 +66,24 @@ class _AuthPageState extends State<AuthPage> {
     setState(() => busy = true);
     try {
       if (challengeId != null) {
-        final result = await api.request('POST', '/auth/verify', {
+        final result = await api.request('POST',
+            verifyingRegistration ? '/auth/register/verify' : '/auth/verify', {
           'challengeId': challengeId,
           'code': otp.text.trim(),
         });
+        if (verifyingRegistration) {
+          if (!mounted) return;
+          setState(() {
+            challengeId = null;
+            verifyingRegistration = false;
+            register = false;
+            otp.clear();
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Đăng ký thành công. Hãy đăng nhập.')),
+          );
+          return;
+        }
         api.token = result['token'] as String;
         if (Platform.isAndroid) {
           try {
@@ -81,15 +96,18 @@ class _AuthPageState extends State<AuthPage> {
               HomePage(user: Map<String, dynamic>.from(result['user'])),
         ));
       } else if (register) {
-        await api.request('POST', '/auth/register', {
+        final result = await api.request('POST', '/auth/register', {
           'username': username.text.trim(),
           'email': email.text.trim(),
           'password': password.text,
         });
         if (!mounted) return;
-        setState(() => register = false);
+        setState(() {
+          challengeId = result['challengeId'] as int;
+          verifyingRegistration = true;
+        });
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Đăng ký xong. Hãy đăng nhập.')),
+          const SnackBar(content: Text('OTP đã gửi đến email. Nhập mã để hoàn tất đăng ký.')),
         );
       } else {
         final result = await api.request('POST', '/auth/login', {
@@ -99,9 +117,7 @@ class _AuthPageState extends State<AuthPage> {
         if (!mounted) return;
         setState(() => challengeId = result['challengeId'] as int);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(result['delivery'] == 'console'
-              ? 'OTP hiển thị trong cửa sổ chạy backend'
-              : 'OTP đã gửi đến email'),
+          content: const Text('OTP đã gửi đến email đã đăng ký'),
         ));
       }
     } catch (e) {
@@ -195,6 +211,7 @@ class _AuthPageState extends State<AuthPage> {
                         ? null
                         : () => setState(() {
                               challengeId = null;
+                              verifyingRegistration = false;
                               register = !register;
                             }),
                     child: Text(register

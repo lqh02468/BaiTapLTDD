@@ -12,15 +12,34 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import server
+from email_service import EmailConfigurationError, EmailService
 
 
 class ApiTest(unittest.TestCase):
+    def test_email_service_configuration_and_smtp(self):
+        with patch.dict(os.environ, {'APP_ENV': 'Production', 'SMTP_HOST': '',
+                                     'SMTP_USER': '', 'SMTP_PASSWORD': '', 'SMTP_FROM': ''}):
+            with self.assertRaises(EmailConfigurationError):
+                EmailService().send_otp('recipient@example.test', '482913', 5)
+        config = {'APP_ENV': 'Production', 'SMTP_HOST': 'smtp.example.test',
+                  'SMTP_PORT': '587', 'SMTP_USER': 'sender@example.test',
+                  'SMTP_PASSWORD': 'app-password', 'SMTP_FROM': 'sender@example.test'}
+        with patch.dict(os.environ, config), patch('email_service.smtplib.SMTP') as smtp:
+            self.assertEqual(EmailService().send_otp('recipient@example.test', '482913', 5), 'email')
+            smtp.return_value.__enter__.return_value.starttls.assert_called_once()
+            smtp.return_value.__enter__.return_value.login.assert_called_once_with(
+                'sender@example.test', 'app-password')
+            message = smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
+            self.assertEqual(message['To'], 'recipient@example.test')
+            self.assertIn('482913', message.get_content())
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
         server.DB_PATH = __import__('pathlib').Path(cls.temp.name) / 'test.db'
         os.environ['BOOTSTRAP_ADMIN_EMAIL'] = 'admin@example.test'
         os.environ['BOOTSTRAP_ADMIN_PASSWORD'] = 'AdminPassword123!'
+        os.environ['APP_ENV'] = 'Development'
         server.init_db()
         cls.http = ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
         cls.thread = threading.Thread(target=cls.http.serve_forever, daemon=True)
@@ -34,6 +53,7 @@ class ApiTest(unittest.TestCase):
         cls.temp.cleanup()
         os.environ.pop('BOOTSTRAP_ADMIN_EMAIL', None)
         os.environ.pop('BOOTSTRAP_ADMIN_PASSWORD', None)
+        os.environ.pop('APP_ENV', None)
 
     def call(self, method, path, body=None, token=None):
         headers = {'Content-Type': 'application/json'}
@@ -49,6 +69,9 @@ class ApiTest(unittest.TestCase):
                 return error.code, json.load(error)
 
     def login(self, identifier, password):
+        with server.connect() as db:
+            db.execute('UPDATE otps SET created_at=0 WHERE user_id IN (SELECT id FROM users WHERE username=? OR email=?)',
+                       (identifier, identifier))
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             status, challenge = self.call('POST', '/auth/login', {'identifier': identifier, 'password': password})
@@ -59,6 +82,106 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(self.call('POST', '/auth/verify', {'challengeId': challenge['challengeId'], 'code': code})[0], 401)
         return result['token']
 
+    def register(self, body):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status, challenge = self.call('POST', '/auth/register', body)
+        if status != 201:
+            return status, challenge
+        code = re.search(r': (\d{6})', output.getvalue()).group(1)
+        verified = self.call('POST', '/auth/register/verify',
+                             {'challengeId': challenge['challengeId'], 'code': code})
+        self.assertEqual(verified[0], 200)
+        return status, challenge
+
+    def test_registration_otp_guards(self):
+        body = {'username': 'otp_guard', 'email': 'otp_guard@example.test', 'password': 'Password123'}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status, first = self.call('POST', '/auth/register', body)
+        self.assertEqual(status, 201)
+        self.assertNotIn('otp', first)
+        code = re.search(r': (\d{6})', output.getvalue()).group(1)
+        self.assertEqual(self.call('POST', '/auth/login',
+                                   {'identifier': body['username'], 'password': body['password']})[0], 401)
+        self.assertEqual(self.call('POST', '/auth/register', body)[0], 429)
+        wrong = '000000' if code != '000000' else '111111'
+        self.assertEqual(self.call('POST', '/auth/register/verify',
+                                   {'challengeId': first['challengeId'], 'code': wrong})[0], 401)
+        with server.connect() as db:
+            self.assertEqual(db.execute('SELECT attempts FROM pending_registrations WHERE id=?',
+                                        (first['challengeId'],)).fetchone()[0], 1)
+            db.execute('UPDATE pending_registrations SET created_at=0 WHERE id=?',
+                       (first['challengeId'],))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status, second = self.call('POST', '/auth/register', body)
+        self.assertEqual(status, 201)
+        new_code = re.search(r': (\d{6})', output.getvalue()).group(1)
+        self.assertEqual(self.call('POST', '/auth/register/verify',
+                                   {'challengeId': first['challengeId'], 'code': code})[0], 401)
+        with server.connect() as db:
+            db.execute('UPDATE pending_registrations SET expires_at=0 WHERE id=?',
+                       (second['challengeId'],))
+        self.assertEqual(self.call('POST', '/auth/register/verify',
+                                   {'challengeId': second['challengeId'], 'code': new_code})[0], 401)
+        with server.connect() as db:
+            db.execute('UPDATE pending_registrations SET expires_at=? WHERE id=?',
+                       (int(__import__('time').time()) + 300, second['challengeId']))
+        self.assertEqual(self.call('POST', '/auth/register/verify',
+                                   {'challengeId': second['challengeId'], 'code': new_code})[0], 200)
+        self.assertEqual(self.call('POST', '/auth/register/verify',
+                                   {'challengeId': second['challengeId'], 'code': new_code})[0], 401)
+
+    def test_login_otp_guards(self):
+        self.register({'username': 'login_guard', 'email': 'login_guard@example.test',
+                       'password': 'Password123'})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status, first = self.call('POST', '/auth/login',
+                                      {'identifier': 'login_guard', 'password': 'Password123'})
+        self.assertEqual(status, 200)
+        code = re.search(r': (\d{6})', output.getvalue()).group(1)
+        self.assertEqual(self.call('POST', '/auth/login',
+                                   {'identifier': 'login_guard', 'password': 'Password123'})[0], 429)
+        wrong = '000000' if code != '000000' else '111111'
+        for _ in range(5):
+            self.assertEqual(self.call('POST', '/auth/verify',
+                                       {'challengeId': first['challengeId'], 'code': wrong})[0], 401)
+        self.assertEqual(self.call('POST', '/auth/verify',
+                                   {'challengeId': first['challengeId'], 'code': code})[0], 401)
+        with server.connect() as db:
+            db.execute('UPDATE otps SET created_at=0 WHERE id=?', (first['challengeId'],))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status, second = self.call('POST', '/auth/login',
+                                       {'identifier': 'login_guard', 'password': 'Password123'})
+        self.assertEqual(status, 200)
+        new_code = re.search(r': (\d{6})', output.getvalue()).group(1)
+        with server.connect() as db:
+            db.execute('UPDATE otps SET expires_at=0 WHERE id=?', (second['challengeId'],))
+        self.assertEqual(self.call('POST', '/auth/verify',
+                                   {'challengeId': second['challengeId'], 'code': new_code})[0], 401)
+        with server.connect() as db:
+            db.execute('UPDATE otps SET expires_at=? WHERE id=?',
+                       (int(__import__('time').time()) + 300, second['challengeId']))
+        self.assertEqual(self.call('POST', '/auth/verify',
+                                   {'challengeId': second['challengeId'], 'code': new_code})[0], 200)
+        self.assertEqual(self.call('POST', '/auth/verify',
+                                   {'challengeId': second['challengeId'], 'code': new_code})[0], 401)
+
+    def test_production_rejects_missing_smtp_without_creating_challenge(self):
+        body = {'username': 'no_smtp_user', 'email': 'no_smtp@example.test',
+                'password': 'Password123'}
+        with patch.dict(os.environ, {'APP_ENV': 'Production', 'SMTP_HOST': '',
+                                     'SMTP_USER': '', 'SMTP_PASSWORD': '', 'SMTP_FROM': ''}):
+            status, result = self.call('POST', '/auth/register', body)
+        self.assertEqual(status, 503)
+        self.assertNotIn('challengeId', result)
+        with server.connect() as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM pending_registrations WHERE email=?',
+                                         (body['email'],)).fetchone())
+
     def face_proof(self, session_id, code, token):
         with patch.object(server.face_auth, 'verify', return_value=True):
             status, result = self.call('POST', f'/sessions/{session_id}/face-verify',
@@ -68,7 +191,7 @@ class ApiTest(unittest.TestCase):
         return result['faceProof']
 
     def test_face_enrollment_and_login_controls(self):
-        self.assertEqual(self.call('POST', '/auth/register', {
+        self.assertEqual(self.register({
             'username': 'face_student', 'email': 'face@example.test', 'password': 'Password123'})[0], 201)
         token = self.login('face_student', 'Password123')
         self.assertEqual(self.call('GET', '/me/face', token=token)[1]['enrolled'], False)
@@ -80,7 +203,7 @@ class ApiTest(unittest.TestCase):
             status, _ = self.call('POST', '/me/face/enroll', {'images': ['a', 'b', 'c']}, token)
         self.assertEqual(status, 200)
         self.assertEqual(self.call('GET', '/me/face', token=token)[1]['enrolled'], True)
-        self.assertEqual(self.call('POST', '/auth/register', {
+        self.assertEqual(self.register({
             'username': 'face_student_b', 'email': 'face_b@example.test', 'password': 'Password123'})[0], 201)
         token_b = self.login('face_student_b', 'Password123')
         with patch.object(server.face_auth, 'enroll', return_value=[[1.0, 0.0]] * 3):
@@ -116,7 +239,7 @@ class ApiTest(unittest.TestCase):
             'identifier': 'face_student', 'images': ['front', 'turn']})[0], 429)
 
     def test_face_checkin_reuses_login_template_and_account(self):
-        self.assertEqual(self.call('POST', '/auth/register', {
+        self.assertEqual(self.register({
             'username': 'face_teacher', 'email': 'face_teacher@example.test',
             'password': 'Password123'})[0], 201)
         admin = self.login('admin@example.test', 'AdminPassword123!')
@@ -129,7 +252,7 @@ class ApiTest(unittest.TestCase):
         tokens = []
         for suffix in ('a', 'b'):
             name = f'face_checkin_{suffix}'
-            self.assertEqual(self.call('POST', '/auth/register', {
+            self.assertEqual(self.register({
                 'username': name, 'email': f'{name}@example.test',
                 'password': 'Password123'})[0], 201)
             token = self.login(name, 'Password123')
@@ -199,8 +322,8 @@ class ApiTest(unittest.TestCase):
 
     def test_attendance_and_permissions(self):
         self.assertEqual(self.call('GET', '/health')[0], 200)
-        self.assertEqual(self.call('POST', '/auth/register', {'username': 'teacher1', 'email': 'teacher@example.test', 'password': 'Password123'})[0], 201)
-        self.assertEqual(self.call('POST', '/auth/register', {'username': 'student1', 'email': 'student@example.test', 'password': 'Password123'})[0], 201)
+        self.assertEqual(self.register({'username': 'teacher1', 'email': 'teacher@example.test', 'password': 'Password123'})[0], 201)
+        self.assertEqual(self.register({'username': 'student1', 'email': 'student@example.test', 'password': 'Password123'})[0], 201)
         admin = self.login('admin@example.test', 'AdminPassword123!')
         student = self.login('student1', 'Password123')
         with patch.object(server.face_auth, 'enroll', return_value=[[1.0, 0.0]] * 3):

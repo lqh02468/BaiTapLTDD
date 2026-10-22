@@ -1,73 +1,197 @@
-# LeQuangHuy — Điểm danh sinh viên
+# LeQuangHuy – ứng dụng điểm danh sinh viên
 
-## Luồng điểm danh sinh viên hiện tại
+> Hướng dẫn triển khai VPS và OTP email hiện tại: [DEPLOY.md](DEPLOY.md). App dùng API Python/SQLite ở `backend/`; Flutter mặc định gọi `http://103.131.85.188:8080`. Đăng ký cần xác minh email trước khi tài khoản được tạo. Các hướng dẫn local bên dưới có thể dùng `--dart-define=API_BASE_URL=...` để ghi đè URL.
 
-Sinh viên đăng ký khuôn mặt một lần trong tài khoản. Khi mở buổi học, ứng dụng đọc trạng thái điểm danh từ database. Nếu đã có bản ghi, màn hình chỉ hiện **Đã điểm danh**, thời gian và trạng thái. Nếu chưa có, sinh viên nhập mã 6 số, bấm **Quét khuôn mặt**, rồi mới có thể bấm **Xác nhận điểm danh**. Mã đúng một mình không mở khóa nút xác nhận.
+Hướng dẫn cho máy Windows vừa clone repository. **Flutter hiện gọi API Python/SQLite ở cổng 8080.** Thư mục `face-api/` là API ASP.NET Core tùy chọn, không cần chạy để dùng đăng nhập hay điểm danh hiện tại. Project không dùng SQL Server, Entity Framework migration hoặc Swagger.
 
-Camera điểm danh dùng cùng `FacePreviewActivity`, mẫu `face_templates` theo UserId và hàm YuNet/SFace `face_auth.verify` như đăng nhập khuôn mặt. Quét thành công chỉ tạo chứng nhận xác thực có hạn 3 phút; chưa ghi Attendance. Khi bấm xác nhận, Android kiểm tra dịch vụ định vị, xin quyền nếu cần và lấy vị trí mới. API kiểm tra lại mã, chứng nhận khuôn mặt, tài khoản, vị trí và khoảng cách trước khi lưu. Nếu GPS tắt, ứng dụng yêu cầu bật và có nút mở cài đặt. Backend chặn lần ghi thứ hai bằng khóa `(session_id,user_id)` và trả `ALREADY_ATTENDED`.
+## 1. Yêu cầu môi trường
 
-Giảng viên chỉ bấm **Mở điểm danh**: ứng dụng lấy vị trí hiện tại, gửi `latitude`, `longitude`, `radiusM: 100`, rồi API lưu vào buổi học. Cả giảng viên và sinh viên dùng chung `LocationService`. Nếu dịch vụ định vị tắt hoặc quyền vị trí bị từ chối vĩnh viễn, ứng dụng mở màn hình cài đặt tương ứng và thử lấy vị trí lại khi quay về. Nên bật **Vị trí chính xác** cho ứng dụng; trong nhà, cần chờ GPS/mạng xác định vị trí hoặc ra nơi thoáng rồi thử lại.
+| Thành phần | Phiên bản/công dụng |
+| --- | --- |
+| Git | Clone source. |
+| Python | 3.10 trở lên, có `venv` và `pip`; máy phát triển hiện dùng 3.14.5. |
+| Flutter và Dart | `pubspec.yaml` yêu cầu Dart `>=3.5.0 <4.0.0`; máy phát triển dùng Flutter 3.47.5 và Dart 3.13.4. Flutter đã kèm Dart. |
+| Android Studio hoặc VS Code | Cài Android SDK, emulator, Android SDK Platform-Tools (`adb`). Chạy `flutter doctor --android-licenses`. |
+| JDK | 17. Android project dùng Gradle wrapper 9.3.1, Android Gradle Plugin 9.1.0 và Kotlin plugin 2.4.0. |
+| .NET SDK | Chỉ cần nếu chạy `face-api/` tùy chọn: .NET 10 (`net10.0`). |
 
-API dùng cho luồng này: `GET /sessions/{id}/attendance/status`, `POST /sessions/{id}/code/validate`, `POST /sessions/{id}/face-verify`, `POST /sessions/{id}/checkin`. Vẫn chạy local; sau khi cập nhật mã cần khởi động lại backend và ứng dụng Android. Điện thoại thật phải truy cập được IP LAN của máy tính.
+Không cần SQL Server/SSMS hoặc .NET SDK để chạy app chính. Flutter không dùng package `geolocator`/`location`; Camera, GPS và sinh trắc học được gọi qua Android native code.
 
-## Chạy API local
+Khi đưa thay đổi lên GitHub, cần bao gồm `mobile/android/gradlew`, `gradlew.bat` và `gradle/wrapper/gradle-wrapper.jar` cùng `gradle-wrapper.properties`; bản clone mới cần đủ bốn file Gradle wrapper này.
 
-Máy cần Python 3.10+. Trong PowerShell tại thư mục gốc, cài thư viện nhận diện khuôn mặt local một lần:
+## 2. Clone project
+
+URL dưới đây lấy từ Git `origin` của source hiện tại. Nếu nhóm chuyển repository, thay bằng URL GitHub mới.
 
 ```powershell
-.\setup_face.ps1
+git clone https://github.com/lqh02468/BaiTapLTDD.git
+cd BaiTapLTDD
 ```
 
-Sau đó chạy backend bằng Python trong môi trường đã cài OpenCV:
+Các lệnh dưới đây giả định đang ở thư mục gốc vừa clone. Không cần đường dẫn `D:\...` hoặc IP của máy Huy.
+
+## 3. Cấu trúc project
+
+```text
+BaiTapLTDD/
+├── mobile/                  Flutter app; lib/api_config.dart quản lý API_BASE_URL
+│   └── android/             Camera, GPS, sinh trắc học native và Gradle wrapper
+├── backend/                 API Python chính, SQLite, test_api.py
+│   ├── models/              YuNet/SFace .onnx và giấy phép, có trong Git
+│   └── .env.example         Mẫu biến môi trường; không tự được nạp
+├── face-api/                ASP.NET Core 10 API khuôn mặt tùy chọn
+├── setup_face.ps1           Tạo Python venv, cài OpenCV/numpy
+├── run_backend.ps1          Chạy API Python
+├── run_android_usb.ps1      Kiểm tra API, adb reverse và chạy Flutter
+└── README.md
+```
+
+## 4. Cài và chạy backend chính
+
+Trong PowerShell ở thư mục gốc:
 
 ```powershell
-$env:BOOTSTRAP_ADMIN_EMAIL='admin@example.com'
-$env:BOOTSTRAP_ADMIN_PASSWORD='choose-a-long-private-password'
+python --version
+.\setup_face.ps1
+$env:API_HOST = '127.0.0.1'
+$env:API_PORT = '8080'
+$env:BOOTSTRAP_ADMIN_EMAIL = 'admin@example.com'
+$env:BOOTSTRAP_ADMIN_PASSWORD = '<mat-khau-rieng-it-nhat-10-ky-tu>'
 .\run_backend.ps1
 ```
 
-API dùng `backend/attendance.db` theo mặc định. Tài khoản admin chỉ được tạo **lần đầu** nếu database chưa có admin. Đổi các giá trị bằng biến môi trường trong [backend/.env.example](backend/.env.example). Không commit mật khẩu hoặc file `.env`.
+Thay email/mật khẩu ví dụ bằng giá trị của **bạn**. `setup_face.ps1` tạo `.tool/face_venv/` và cài `opencv-python-headless==4.11.0.86` cùng NumPy; chỉ cần chạy lại khi cài mới hoặc đổi Python. Nếu PowerShell chặn script, chạy `Set-ExecutionPolicy -Scope Process Bypass` trong chính cửa sổ đó rồi thử lại. Giữ cửa sổ backend mở khi dùng app.
 
-Nếu chạy app trên điện thoại thật, đặt `$env:API_HOST='0.0.0.0'` trước khi chạy backend. Laptop và điện thoại phải cùng mạng LAN; cho phép cổng 8080 qua firewall nếu cần. Tìm IPv4 của laptop bằng `ipconfig`, rồi dùng địa chỉ đó trong lệnh Flutter. Không dùng `localhost` trên điện thoại để truy cập laptop.
+API mặc định ở `http://127.0.0.1:8080`. Mở `http://127.0.0.1:8080/health`; phải nhận JSON `{"status":"ok"}`. **Không có Swagger**: `/swagger` trả 404. Nếu đổi `API_PORT`, phải dùng cùng cổng trong URL Flutter. Script USB hiện dùng cổng 8080.
 
-Mặc định OTP được in ra cửa sổ backend để cả nhóm thử local. Muốn gửi email thật, đặt `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` trước khi khởi động. SMTP và hộp thư thật chưa được kiểm chứng trong môi trường này.
+### Database và cấu hình
 
-## Chạy Flutter
+API chính dùng **SQLite** tại `backend/attendance.db` theo mặc định. `server.py` tự tạo database và bảng khi khởi động; không có lệnh migration hoặc connection string SQL Server. File `.db` không đưa lên Git. Nếu muốn dùng file khác, đặt biến `ATTENDANCE_DB` thành **đường dẫn tuyệt đối trên máy bạn** trước khi chạy backend. Mỗi người clone sẽ có database và tài khoản riêng.
 
-Máy cần Flutter SDK, Android SDK và thiết bị/emulator. Tại thư mục `mobile`:
+`backend/.env.example` chỉ liệt kê tên biến; script hiện đọc **biến môi trường PowerShell**, không tự nạp file `.env`. Các biến chính là `API_HOST`, `API_PORT`, `ATTENDANCE_DB`, `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `CORS_ORIGIN`. Không commit mật khẩu, token hay database thật. Admin được tạo khi database chưa có admin và đã đặt email/mật khẩu bootstrap; đổi biến sau đó không đổi mật khẩu tài khoản admin đã tạo.
+
+## 5. Email OTP và tài khoản thử
+
+Chế độ Production bắt buộc cấu hình SMTP để gửi OTP thật. Chỉ khi `APP_ENV=Development` và thiếu SMTP, OTP mới in trong cửa sổ backend để debug. Để dùng SMTP, đặt biến riêng trong cùng PowerShell **trước khi chạy backend**:
 
 ```powershell
-flutter pub get
-flutter run
+$env:SMTP_HOST = '<smtp-host>'
+$env:SMTP_PORT = '587'
+$env:SMTP_USER = '<smtp-user>'
+$env:SMTP_PASSWORD = '<smtp-secret>'
+$env:SMTP_FROM = '<email-nguoi-gui>'
 ```
 
-Mặc định app dùng `http://127.0.0.1:8080`, phù hợp với Android thật qua USB sau khi chạy `adb reverse tcp:8080 tcp:8080`. Có thể chạy nhanh từ thư mục gốc bằng `./run_android_usb.ps1` sau khi API đã chạy. Lệnh này kiểm tra API, ADB, bật reverse rồi chạy Flutter. Với Android emulator không dùng reverse, truyền `--dart-define=API_BASE_URL=http://10.0.2.2:8080`. Với điện thoại thật qua Wi-Fi:
+Backend dùng SMTP với STARTTLS. Project không cung cấp secret; không đưa giá trị thật lên GitHub. Không có tài khoản giảng viên/sinh viên demo được seed. Hãy đăng ký tài khoản mới trong app và xác minh OTP gửi đến email trước khi đăng nhập. Đăng nhập admin bootstrap bằng OTP gửi đến email admin, rồi đổi role một tài khoản thành `teacher` trong màn hình quản lý; tài khoản mới mặc định là `student`.
+
+## 6. Chạy Flutter và chọn API Base URL
+
+Mở PowerShell **khác**, ở thư mục gốc:
 
 ```powershell
+cd mobile
+flutter pub get
+flutter doctor
+flutter devices
+```
+
+Mọi màn hình dùng chung `mobile/lib/api_config.dart` với `String.fromEnvironment('API_BASE_URL')`. **Không sửa URL trong từng màn hình.** Truyền URL khi chạy/build bằng `--dart-define=API_BASE_URL=...`. Mặc định là `http://103.131.85.188:8080`; dùng URL local qua `--dart-define` khi phát triển. Sau khi đổi `--dart-define`, chạy lại app; hot reload không đổi giá trị này.
+
+### Android Emulator
+
+Chạy backend với `API_HOST=127.0.0.1`, mở emulator, rồi trong `mobile/` chạy:
+
+```powershell
+flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8080
+```
+
+`10.0.2.2` là địa chỉ laptop từ Android Emulator. Camera/sinh trắc học tùy khả năng emulator; nên dùng điện thoại thật để thử nhận diện khuôn mặt và GPS.
+
+### Điện thoại Android cắm USB
+
+Bật Developer options, USB debugging và chấp nhận khóa RSA trên điện thoại. Chạy backend tại `127.0.0.1:8080`. Từ **thư mục gốc** chạy:
+
+```powershell
+adb devices
+.\run_android_usb.ps1
+```
+
+Script tìm `adb` trong `PATH` hoặc `ANDROID_HOME`/`ANDROID_SDK_ROOT`, kiểm tra `/health`, chạy `adb reverse tcp:8080 tcp:8080` rồi chạy Flutter với `API_BASE_URL=http://127.0.0.1:8080`. **USB không cần sửa IP hay cùng Wi-Fi.** Nếu có nhiều thiết bị: `.\run_android_usb.ps1 -DeviceId <id-tu-adb-devices>`.
+
+Nếu PowerShell không nhận lệnh `adb`, tìm Android SDK path trong Android Studio → SDK Manager, rồi thêm thư mục `platform-tools` vào `PATH` hoặc đặt `ANDROID_HOME` tới thư mục SDK đó trên máy bạn.
+
+### Điện thoại Android qua Wi-Fi/LAN
+
+Laptop và điện thoại phải cùng mạng và nhìn thấy nhau. Trong cửa sổ backend, đặt host **trước khi chạy**:
+
+```powershell
+$env:API_HOST = '0.0.0.0'
+$env:API_PORT = '8080'
+.\run_backend.ps1
+```
+
+Trên laptop chạy `ipconfig`, lấy **IPv4 của card Wi-Fi đang dùng**. Ví dụ nếu laptop **của bạn** là `192.168.1.10`, trong `mobile/` chạy:
+
+```powershell
+flutter devices
 flutter run --dart-define=API_BASE_URL=http://192.168.1.10:8080
 ```
 
-Thay IP ví dụ bằng IPv4 của laptop. Mọi lời gọi API đi qua [mobile/lib/api_config.dart](mobile/lib/api_config.dart). Sau này đổi sang HTTPS public chỉ cần đổi `API_BASE_URL`, đồng thời cấu hình lại backend, SMTP, CORS và Android network policy khi deploy.
+**Thay `192.168.1.10` bằng IPv4 thật của máy đang chạy backend.** Mỗi thành viên chỉ cần thay IP trong **lệnh `flutter run` hoặc `flutter build`**; không sửa file Dart và không dùng IP cố định của máy Huy. Khi chuyển mạng/IP thay đổi, chạy lại Flutter với URL mới. Kiểm tra `http://<IP-cua-ban>:8080/health` trong trình duyệt điện thoại trước nếu app bị timeout.
 
-## Luồng thử nhanh
+Windows Firewall có thể chặn cổng 8080. Chỉ cho phép Python hoặc TCP 8080 trên mạng **Private** trong Windows Defender Firewall; không tắt toàn bộ firewall. Wi-Fi công cộng có client isolation có thể không cho hai thiết bị kết nối; dùng USB `adb reverse` khi đó.
 
-1. Đăng ký hai tài khoản sinh viên qua email.
-2. Đăng nhập admin và nhập OTP từ console API. Trong danh sách người dùng, đổi một tài khoản thành `teacher`.
-3. Đăng nhập teacher, tạo lớp, đưa mã lớp cho student, bấm **Mở điểm danh** trên Android. Ứng dụng tự lấy vị trí giảng viên và đặt bán kính 100m.
-4. Student tham gia lớp, mở buổi học, nhập mã, quét khuôn mặt, rồi bấm **Xác nhận điểm danh**. Luôn bật định vị và cấp quyền vị trí khi xác nhận. Giảng viên xem danh sách đã điểm danh.
-5. Sau lần đăng nhập OTP đầu trên điện thoại, có thể chọn **Đăng nhập bằng sinh trắc học** để mở hộp thoại Android và dùng vân tay hoặc khuôn mặt mà hệ điều hành hỗ trợ. Phiên API đã lưu hết hạn sau 7 ngày.
-6. Tùy chọn **Quét khuôn mặt đã đăng ký trong app** là cơ chế riêng: sau khi đăng nhập bằng OTP, trong trang chính chọn **Đăng ký khuôn mặt** để lưu ba mẫu đặc trưng vào SQLite. Một khuôn mặt có thể đăng ký cho nhiều tài khoản; mỗi tài khoản giữ mẫu theo UserId riêng. Đăng xuất, nhập username hoặc email của tài khoản muốn đăng nhập rồi chọn nút quét riêng. App lấy ảnh khi camera đang mở, kiểm tra nhìn thẳng và quay đầu rồi so khớp với mẫu của tài khoản đã nhập trên backend local. Ảnh gốc được xử lý trong bộ nhớ, chỉ đặc trưng được lưu. Trang chính có nút xóa mẫu.
-7. Bước quay đầu của cơ chế riêng giảm khả năng dùng một ảnh tĩnh, nhưng không chống được mọi video hoặc kỹ thuật giả mạo. Chức năng này chỉ dành cho bài tập/local; trước khi dùng thật cần kiểm thử độ chính xác, chống giả mạo và HTTPS. Mô hình YuNet/SFace nằm trong `backend/models` cùng giấy phép; OpenCV xử lý trên laptop, không dùng dịch vụ online.
-8. Dashboard sinh viên hiển thị tỉ lệ chuyên cần và cảnh báo khi dưới 80% sau ít nhất ba buổi đã kết thúc.
+## 7. Android permissions và khuôn mặt
 
-## Kiểm tra
+Lần đầu chạy, cấp **Camera** khi đăng ký/đăng nhập/quét mặt và **Location** khi giảng viên mở buổi hoặc sinh viên xác nhận. Bật GPS/Location Service, nên chọn **Vị trí chính xác**. Sinh trắc học phải thiết lập sẵn trong Android; app dùng prompt của hệ điều hành. Không cần quyền vị trí nền.
+
+Đăng nhập OTP trước, vào tài khoản và **đăng ký khuôn mặt**. Mẫu đó dùng chung để đăng nhập bằng mặt và xác thực điểm danh. Backend dùng `backend/models/yunet.onnx` để phát hiện mặt và `backend/models/sface_int8.onnx` để tạo/so khớp đặc trưng. Hai file ONNX và giấy phép đã có trong Git; **không cần `.tflite` hay tải model riêng**. Một mặt có thể đăng ký cho nhiều tài khoản thử nhưng mẫu lưu theo UserId. Quét mặt điểm danh chỉ mở khóa nút xác nhận; khi xác nhận app còn lấy GPS, API kiểm tra bán kính 100 m.
+
+## 8. Thứ tự chạy và kiểm tra nhanh
+
+1. Clone; cài Python, Flutter, Android SDK/JDK; chạy `.\setup_face.ps1` và `flutter pub get` lần đầu.
+2. Đặt email/mật khẩu bootstrap rồi chạy `.\run_backend.ps1`.
+3. Mở `http://127.0.0.1:8080/health`; thấy `{"status":"ok"}` rồi mới chạy Flutter. API chính không có Swagger.
+4. Kết nối emulator/điện thoại, chọn URL API theo mục 6, chạy Flutter.
+5. Cấp Camera/Location, đăng ký/đăng nhập và lấy OTP từ email qua SMTP đã cấu hình (hoặc console chỉ trong Development).
+6. Admin đổi role giảng viên; giảng viên tạo lớp/mở buổi; sinh viên tham gia lớp, đăng ký mặt, nhập mã, quét mặt và xác nhận khi GPS bật.
+
+## 9. ASP.NET Core `face-api/` (tùy chọn)
+
+Phần này **không thay thế API Python cổng 8080** và app Flutter hiện không gọi nó. Nếu cần thử, cài .NET SDK 10, chạy API Python trước để tạo SQLite, rồi dùng PowerShell khác:
+
+```powershell
+cd face-api
+dotnet restore
+dotnet build --no-restore
+dotnet run --no-restore --urls http://127.0.0.1:8081
+```
+
+Kiểm tra `http://127.0.0.1:8081/health`. API .NET dùng `Microsoft.Data.Sqlite` 10.0.2, cùng `backend/attendance.db` mặc định hoặc `ATTENDANCE_DB` giống API Python, tự tạo `face_profiles`. **Không dùng SQL Server, `appsettings.json` connection string, `dotnet ef database update` hay Swagger.** Không cần chạy `run_face_api.ps1` để app chính hoạt động.
+
+## 10. Kiểm tra build
 
 ```powershell
 cd backend
-python -m unittest -v test_api.py
-cd ../mobile
-dart analyze lib
-flutter build apk --debug --dart-define=API_BASE_URL=http://192.168.1.10:8080
+..\.tool\face_venv\Scripts\python.exe -m py_compile server.py face_auth.py
+..\.tool\face_venv\Scripts\python.exe -m unittest -v test_api.py
+cd ..\mobile
+flutter analyze
+flutter build apk --debug --dart-define=API_BASE_URL=http://10.0.2.2:8080
 ```
 
-Chỉ đưa IP LAN vào APK thử trên điện thoại thật; Android emulator dùng mặc định. SQLite, mã OTP console và HTTP LAN chỉ dành cho giai đoạn local. Cần SMTP thực, HTTPS, giới hạn CORS, bảo vệ endpoint khỏi lạm dụng và kiểm tra sinh trắc học/GPS trên thiết bị thật trước khi phát hành.
+Build trên nhúng URL **emulator**. Nếu build APK cho Wi-Fi, thay bằng IPv4 thật của laptop. Với USB, dùng `http://127.0.0.1:8080` cùng `adb reverse`. APK debug nằm ở `mobile/build/app/outputs/flutter-apk/app-debug.apk` khi build thành công.
+
+## 11. Lỗi thường gặp
+
+| Hiện tượng | Cách kiểm tra |
+| --- | --- |
+| Flutter không gọi được API / `TimeoutException` | Kiểm tra `/health`, cổng 8080, `API_HOST`, URL trong `--dart-define`. Emulator dùng `10.0.2.2`; USB dùng `adb reverse`; Wi-Fi dùng IPv4 laptop và cùng mạng. Kiểm tra Firewall. |
+| Điện thoại không hiện trong `flutter devices` | Bật USB debugging, cáp truyền dữ liệu, chấp nhận RSA, kiểm tra `adb devices` và driver USB Android. |
+| Camera không mở | Cấp Camera permission, đóng app khác đang dùng camera, dùng thiết bị có camera trước. |
+| GPS/vị trí lỗi | Bật Location Service, cấp Location permission và Vị trí chính xác trong App Settings; ra nơi thoáng nếu tín hiệu yếu. App phân biệt GPS tắt, từ chối quyền, từ chối vĩnh viễn và timeout. |
+| SQLite lỗi | Kiểm tra quyền ghi thư mục `backend/` và `ATTENDANCE_DB` nếu tự đặt. Không cần SQL Server. |
+| Không nhận OTP email | Nếu chưa cấu hình SMTP, xem dòng `[LOCAL OTP]` ở terminal backend. Nếu dùng SMTP, kiểm tra host, port, STARTTLS, tài khoản và secret riêng. |
+| Flutter/Gradle build lỗi | Chạy `flutter doctor -v`, `flutter pub get`, kiểm tra JDK 17, Android SDK/licenses và Gradle wrapper trong `mobile/android/gradle/wrapper/`. Nếu lỗi tại `settings.gradle.kts` trước khi biên dịch app, gửi log Gradle đầy đủ cho nhóm. |
+
+Project đang ưu tiên chạy local, chưa cần deploy.

@@ -49,10 +49,10 @@ class Api {
       return Map<String, dynamic>.from(body);
     } on SocketException {
       throw ApiException(
-          'Không kết nối được API $_baseUrl. Kiểm tra API và adb reverse.');
+          'Không kết nối được API $_baseUrl. Kiểm tra Internet và URL API.');
     } on TimeoutException {
       throw ApiException(
-          'API $_baseUrl phản hồi quá chậm. Kiểm tra adb reverse và URL.');
+          'API $_baseUrl phản hồi quá chậm. Kiểm tra Internet và URL API.');
     } on HandshakeException {
       throw ApiException('Kết nối HTTPS không hợp lệ');
     } on HttpException catch (e) {

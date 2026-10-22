@@ -1,26 +1,26 @@
-"""Local attendance API. Face sign-in additionally uses OpenCV."""
+"""Attendance API. Face sign-in additionally uses OpenCV."""
 import base64
 import hashlib
 import hmac
 import json
 import os
 import secrets
-import smtplib
 import sqlite3
 import time
 from contextlib import contextmanager
-from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from math import isfinite
 from urllib.parse import urlparse, parse_qs
 
 import face_auth
+from email_service import EmailConfigurationError, EmailService
 
 DB_PATH = Path(os.getenv('ATTENDANCE_DB', Path(__file__).with_name('attendance.db')))
 HOST = os.getenv('API_HOST', '127.0.0.1')
 PORT = int(os.getenv('API_PORT', '8080'))
-OTP_MINUTES = 10
+OTP_MINUTES = 5
+OTP_RESEND_SECONDS = 60
 
 
 @contextmanager
@@ -46,7 +46,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS otps (
             id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
             code_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-            used INTEGER NOT NULL DEFAULT 0);
+            used INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS pending_registrations (
+            id INTEGER PRIMARY KEY, username TEXT NOT NULL, email TEXT NOT NULL,
+            password_hash TEXT NOT NULL, code_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0, used INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS tokens (
             token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
             expires_at INTEGER NOT NULL);
@@ -81,6 +86,9 @@ def init_db():
         columns = {row['name'] for row in db.execute('PRAGMA table_info(users)')}
         if 'student_code' not in columns:
             db.execute('ALTER TABLE users ADD COLUMN student_code TEXT')
+        otp_columns = {row['name'] for row in db.execute('PRAGMA table_info(otps)')}
+        if 'created_at' not in otp_columns:
+            db.execute('ALTER TABLE otps ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0')
         db.execute("UPDATE users SET student_code=printf('SV%06d',id) WHERE student_code IS NULL")
         admin_email = os.getenv('BOOTSTRAP_ADMIN_EMAIL', '').strip().lower()
         admin_password = os.getenv('BOOTSTRAP_ADMIN_PASSWORD', '')
@@ -117,20 +125,10 @@ def verify_registered_face(db, user, images, mismatch_message):
 
 
 def send_otp(address, code):
-    host = os.getenv('SMTP_HOST')
-    if not host:
-        print(f'[LOCAL OTP] {address}: {code}', flush=True)
-        return 'console'
-    message = EmailMessage()
-    message['Subject'] = 'Ma OTP dang nhap LeQuangHuy'
-    message['From'] = os.getenv('SMTP_FROM', os.getenv('SMTP_USER', ''))
-    message['To'] = address
-    message.set_content(f'Ma OTP cua ban la {code}. Hieu luc {OTP_MINUTES} phut.')
-    with smtplib.SMTP(host, int(os.getenv('SMTP_PORT', '587')), timeout=15) as smtp:
-        smtp.starttls()
-        smtp.login(os.getenv('SMTP_USER', ''), os.getenv('SMTP_PASSWORD', ''))
-        smtp.send_message(message)
-    return 'email'
+    try:
+        return EmailService().send_otp(address, code, OTP_MINUTES)
+    except EmailConfigurationError as exc:
+        raise ApiError(503, str(exc)) from exc
 
 
 def distance_m(a, b, c, d):
@@ -165,9 +163,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(payload)))
-        self.send_header('Access-Control-Allow-Origin', os.getenv('CORS_ORIGIN', '*'))
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        origin = self.headers.get('Origin')
+        allowed = [value.strip() for value in os.getenv('CORS_ORIGINS', '').split(',') if value.strip()]
+        if origin and origin in allowed:
+            self.send_header('Access-Control-Allow-Origin', origin)
+            self.send_header('Vary', 'Origin')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
         self.end_headers()
         self.wfile.write(payload)
 
@@ -226,26 +228,60 @@ class Handler(BaseHTTPRequestHandler):
             require(3 <= len(username) <= 40 and username.replace('_', '').isalnum(), 400, 'Username cần 3-40 ký tự chữ/số')
             require('@' in email and '.' in email.split('@')[-1] and len(email) <= 254, 400, 'Email không hợp lệ')
             require(len(password) >= 8, 400, 'Mật khẩu cần ít nhất 8 ký tự')
+            require(not db.execute('SELECT 1 FROM users WHERE username=? OR email=?', (username, email)).fetchone(),
+                    409, 'Username hoặc email đã được sử dụng')
+            recent = db.execute('SELECT created_at FROM pending_registrations WHERE email=? ORDER BY id DESC LIMIT 1',
+                                (email,)).fetchone()
+            require(not recent or recent['created_at'] <= now - OTP_RESEND_SECONDS, 429,
+                    'Vui lòng chờ 60 giây trước khi gửi OTP mới')
+            code = f'{secrets.randbelow(1000000):06d}'
+            delivery = send_otp(email, code)
+            db.execute('UPDATE pending_registrations SET used=1 WHERE email=?', (email,))
+            challenge_id = db.execute('''INSERT INTO pending_registrations
+                (username,email,password_hash,code_hash,created_at,expires_at) VALUES(?,?,?,?,?,?)''',
+                (username, email, password_hash(password), hashlib.sha256(code.encode()).hexdigest(),
+                 now, now + OTP_MINUTES * 60)).lastrowid
+            return 201, {'challengeId': challenge_id, 'delivery': delivery,
+                         'message': 'Mã OTP đã được gửi tới email. Xác minh để hoàn tất đăng ký.'}
+        if method == 'POST' and path == '/auth/register/verify':
+            pending = db.execute('SELECT * FROM pending_registrations WHERE id=?',
+                                 (int(body.get('challengeId', 0)),)).fetchone()
+            require(pending and not pending['used'] and pending['expires_at'] > now and pending['attempts'] < 5,
+                    401, 'OTP hết hạn hoặc không hợp lệ')
+            db.execute('UPDATE pending_registrations SET attempts=attempts+1 WHERE id=?', (pending['id'],))
+            valid = hmac.compare_digest(pending['code_hash'],
+                                        hashlib.sha256(str(body.get('code', '')).encode()).hexdigest())
+            if not valid:
+                db.commit()
+                raise ApiError(401, 'OTP không đúng')
             uid = db.execute('INSERT INTO users(username,email,password_hash,role,created_at) VALUES(?,?,?,?,?)',
-                             (username, email, password_hash(password), 'student', now)).lastrowid
+                             (pending['username'], pending['email'], pending['password_hash'], 'student', now)).lastrowid
             db.execute('UPDATE users SET student_code=? WHERE id=?', (f'SV{uid:06d}', uid))
-            return 201, {'message': 'Đăng ký thành công', 'role': 'student'}
+            db.execute('UPDATE pending_registrations SET used=1 WHERE id=?', (pending['id'],))
+            return 200, {'message': 'Đăng ký thành công', 'role': 'student'}
         if method == 'POST' and path == '/auth/login':
             name = str(body.get('identifier', '')).strip()
             user = db.execute('SELECT * FROM users WHERE username=? OR email=?', (name, name.lower())).fetchone()
             require(user and password_ok(str(body.get('password', '')), user['password_hash']), 401, 'Sai tài khoản hoặc mật khẩu')
+            recent = db.execute('SELECT created_at FROM otps WHERE user_id=? ORDER BY id DESC LIMIT 1',
+                                (user['id'],)).fetchone()
+            require(not recent or recent['created_at'] <= now - OTP_RESEND_SECONDS, 429,
+                    'Vui lòng chờ 60 giây trước khi gửi OTP mới')
             code = f'{secrets.randbelow(1000000):06d}'
-            db.execute('UPDATE otps SET used=1 WHERE user_id=?', (user['id'],))
-            otp_id = db.execute('INSERT INTO otps(user_id,code_hash,expires_at) VALUES(?,?,?)',
-                                (user['id'], hashlib.sha256(code.encode()).hexdigest(), now + OTP_MINUTES * 60)).lastrowid
             delivery = send_otp(user['email'], code)
+            db.execute('UPDATE otps SET used=1 WHERE user_id=?', (user['id'],))
+            otp_id = db.execute('INSERT INTO otps(user_id,code_hash,expires_at,created_at) VALUES(?,?,?,?)',
+                                (user['id'], hashlib.sha256(code.encode()).hexdigest(),
+                                 now + OTP_MINUTES * 60, now)).lastrowid
             return 200, {'challengeId': otp_id, 'delivery': delivery, 'message': 'Nhập OTP để hoàn tất đăng nhập'}
         if method == 'POST' and path == '/auth/verify':
             otp = db.execute('SELECT * FROM otps WHERE id=?', (int(body.get('challengeId', 0)),)).fetchone()
             require(otp and not otp['used'] and otp['expires_at'] > now and otp['attempts'] < 5, 401, 'OTP hết hạn hoặc không hợp lệ')
             db.execute('UPDATE otps SET attempts=attempts+1 WHERE id=?', (otp['id'],))
             valid = hmac.compare_digest(otp['code_hash'], hashlib.sha256(str(body.get('code', '')).encode()).hexdigest())
-            require(valid, 401, 'OTP không đúng')
+            if not valid:
+                db.commit()
+                raise ApiError(401, 'OTP không đúng')
             db.execute('UPDATE otps SET used=1 WHERE id=?', (otp['id'],))
             token = secrets.token_urlsafe(32)
             db.execute('INSERT INTO tokens VALUES(?,?,?)', (hashlib.sha256(token.encode()).hexdigest(), otp['user_id'], now + 7*86400))
